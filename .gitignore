@@ -1,5 +1,6 @@
 # Ignore generated data and report files
 *.json
+!config.json
 *.md
 !README.md
 

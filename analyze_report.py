@@ -21,6 +21,8 @@ def load_config():
 
 config_data = load_config()
 AI_API_URL = config_data.get("ai_api_url", "http://localhost:11434/api/generate")
+AI_API_KEY = config_data.get("ai_api_key") # Can be None
+AI_API_TIMEOUT = config_data.get("ai_api_timeout", 120)
 ANALYSIS_PROFILES = config_data.get("analysis_profiles", {})
 
 # The model is read from the AI_MODEL environment variable.
@@ -37,9 +39,13 @@ def get_analysis_from_llm(prompt_data):
             "stream": False
         }
         
+        headers = {"Content-Type": "application/json"}
+        if AI_API_KEY:
+            headers["Authorization"] = f"Bearer {AI_API_KEY}"
+
         print(f"--- Contacting AI at {AI_API_URL} with model {AI_MODEL}... ---", file=sys.stderr)
         
-        response = requests.post(AI_API_URL, json=payload)
+        response = requests.post(AI_API_URL, json=payload, headers=headers, timeout=AI_API_TIMEOUT)
         response.raise_for_status()
 
         print("--- Received response. Generating report... ---", file=sys.stderr)
@@ -47,6 +53,8 @@ def get_analysis_from_llm(prompt_data):
         response_json = response.json()
         return response_json.get("response", "").strip()
 
+    except requests.exceptions.Timeout:
+        return f"Error: The request to the AI API timed out after {AI_API_TIMEOUT} seconds."
     except requests.exceptions.RequestException as e:
         return f"Error: Could not connect to AI API at {AI_API_URL}. Please ensure the endpoint is correct and the service is running. Details: {e}"
     except json.JSONDecodeError:

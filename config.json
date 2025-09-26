@@ -1,0 +1,17 @@
+{
+    "ai_api_url": "http://localhost:11434/api/generate",
+    "ai_api_key": "",
+    "ai_api_timeout": 120,
+    "analysis_profiles": {
+        "perf": {
+            "data_file": "pg2aidba.json",
+            "prompt_file": "prompt/perf_prompt.txt",
+            "output_prefix": "pg2aidba-perf"
+        },
+        "base": {
+            "data_file": "pg2aidba_base.json",
+            "prompt_file": "prompt/base_prompt.txt",
+            "output_prefix": "pg2aidba-base"
+        }
+    }
+}
