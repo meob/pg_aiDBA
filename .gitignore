@@ -1,0 +1,8 @@
+# Ignore generated data and report files
+*.json
+*.md
+!README.md
+
+# Ignore system and cache files
+.DS_Store
+__pycache__/
