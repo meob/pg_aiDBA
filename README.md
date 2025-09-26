@@ -14,6 +14,7 @@ The system is designed with two distinct analysis levels: **base** (for operatio
 - `pg2aidba.sql`: "perf" analysis SQL script. Collects a comprehensive set of performance metrics from the PostgreSQL database.
 - `pg2aidba_base.sql`: "base" analysis SQL script. Collects operational data for a status report.
 - `prompt/`: A directory containing the prompt templates for the LLM (`base_prompt.txt` and `perf_prompt.txt`).
+- `requirements.txt`: A file listing the Python dependencies required for the RAG functionality.
 
 ## Quick Start
 
@@ -23,7 +24,11 @@ The easiest way to run an analysis is to use the launcher script.
 
 Before you begin, ensure you have the following installed:
 
-- **Python 3**: The analysis script is written in Python 3.
+- **Python 3** and **pip**: The analysis script is written in Python 3.
+- **Python Dependencies**: Install the required libraries for the project, including the optional RAG components.
+  ```bash
+  pip install -r requirements.txt
+  ```
 - **PostgreSQL Client (`psql`)**: Required to run the data collection SQL scripts.
 - **Ollama**: The system defaults to a local Ollama instance. You can find installation instructions at [ollama.com](https://ollama.com/). You can also use any OpenAI-compatible API endpoint.
 
@@ -86,21 +91,56 @@ python3 analyze_report.py perf
 
 This modularity allows you to re-run the analysis with different models or customized prompts without querying the database every time.
 
-## Customization: The Performance Prompt
+## Customization
 
-The quality of the performance report (`perf`) is highly dependent on the prompt used to instruct the AI. The default prompt is located at `prompt/perf_prompt.txt`.
+This project is highly customizable. You can tailor the AI's behavior and knowledge base by editing the configuration and prompt files.
 
-**This prompt is designed to be customized.** You can and should edit it to include specific details about your environment, such as:
-- Known workload patterns (e.g., "This is an OLTP system with high write contention on the `orders` table").
-- Application behavior (e.g., "The application uses a connection pool of 50 connections").
-- Hardware context (e.g., "The database runs on a server with 128GB of RAM and fast NVMe storage").
+### Performance Prompt
 
-Providing this context will allow the AI to generate much more relevant and actionable recommendations.
+The quality of the performance report (`perf`) is highly dependent on the prompt used to instruct the AI. The default prompt is located at `prompt/perf_prompt.txt`. You can edit this file to include specific details about your environment, workload, or hardware.
 
-## Roadmap
+### LLM Models and Parameters
 
-- **Retrieval-Augmented Generation (RAG)**: We plan to enhance the analysis by incorporating a RAG approach. This will allow the AI to reference external documentation, articles, or internal knowledge bases to provide even more insightful and context-aware recommendations.
-- **Cloud LLM Integration**: Improve integration with cloud-based LLMs by adding robust support for API keys and adapting to different API schemas.
+The `config.json` file allows you to define which LLM models to use and how they behave.
+
+- **Model Choice**: For `base` analysis, it's recommended to use smaller, local models (e.g., `llama3:8b` via Ollama) due to their efficiency. For `perf` analysis, more powerful models are suggested. Ollama allows you to easily pull and use larger cloud-based models (e.g., `gpt-oss:120b-cloud`) if configured. The `AI_MODEL` environment variable overrides the default.
+- **Parameters**: The `llm_params` section in `config.json` controls the LLM's behavior. These parameters influence the creativity and determinism of the model's output.
+  - **`temperature`**: Controls randomness. Lower values (e.g., 0.1-0.3) make the output more focused and deterministic. Higher values make it more creative. For this tool, **low values are strongly recommended** to ensure factual and reliable analysis.
+  - **`top_p`**: An alternative to temperature that controls the nucleus of probable words for the model to choose from.
+
+The script is generic and will pass any parameter from this section to the model API, nested under an `options` key for Ollama compatibility.
+
+### RAG Knowledge Base
+
+The Retrieval-Augmented Generation (RAG) feature allows the AI to pull context from a custom knowledge base during `perf` analysis.
+
+- **Suitable Documents**: The effectiveness of RAG depends on the quality and relevance of your documents. Ideal documents include:
+  - **Application Profiles**: Descriptions of your applications (OLTP, DWH, etc.), their workload patterns, and hardware context.
+  - **Known Anti-Patterns**: Documented common issues, inefficient code patterns, or specific behaviors of your application.
+  - **Internal Best Practices**: Your organization's specific guidelines for PostgreSQL tuning, deployment, or monitoring.
+  - **Domain-Specific Tuning**: Advice tailored to your industry or specific use cases.
+- **Adding Documents**: To add knowledge, place your own Markdown (`.md`) or text (`.txt`) files into the `rag_sources/` directory. The project includes technical articles and templates to get you started.
+- **Loading Documents**: After adding or changing documents, you must load them into the vector database by running:
+  ```bash
+  python3 load_rag.py
+  ```
+
+### RAG Parameters
+
+The behavior of the RAG system is controlled by the `rag_config` section in `config.json`.
+
+- **`embedding_model`**: The model used to create numerical representations of text. The default is now set to `BAAI/bge-large-en-v1.5`, a powerful and well-regarded model. You can switch to other models, but you **must** re-run `load_rag.py` after changing the name.
+  - **Important Note on Changing Models**: If you change the `embedding_model`, you **must** manually drop the RAG table in your PostgreSQL database (e.g., `DROP TABLE pg_aidba_rag_kb;` in `psql`) before re-running `python3 load_rag.py`. This is because different embedding models produce vectors of different dimensions, and the database table needs to be recreated with the correct vector dimension. Alternatively, you can change the `table_name` in `config.json` to use a new table.
+  - **Good Alternatives**: `nomic-ai/nomic-embed-text-v1.5` (very efficient), `Salesforce/SFR-Embedding-Mistral` (latest generation), or the lighter `all-MiniLM-L6-v2` (fast, less resource-intensive).
+- **`chunk_size`**: The size of each piece of text (in tokens) stored in the vector database. The default of `512` is a good balance between context size and focus.
+- **`chunk_overlap`**: The number of tokens that overlap between consecutive chunks. This prevents sentences from being cut in half and losing their meaning.
+
+## RAG Search Parameters
+
+The RAG search functionality has been enhanced to include database metadata and support parametric searches, allowing for more precise and context-aware retrieval of information.
+
+- **Database Metadata Inclusion**: When performing RAG searches, relevant metadata from the PostgreSQL database is now automatically incorporated into the query context. This enriches the search with real-time database schema, statistics, and configuration details, leading to more accurate and tailored recommendations.
+- **Parametric Searches**: The RAG system now supports parametric queries, enabling users to specify conditions and filters for their searches. This allows for highly targeted information retrieval based on specific criteria, improving the relevance of the retrieved documents for the LLM.
 
 ## License
 
