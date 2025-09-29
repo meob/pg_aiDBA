@@ -1,5 +1,6 @@
 {
     "ai_api_url": "http://localhost:11434/api/generate",
+    "ai_api_embedding_url": "http://localhost:11434/api/embeddings",
     "ai_api_key": "",
     "ai_api_timeout": 120,
     "analysis_profiles": {
@@ -25,7 +26,8 @@
     },
     "rag_config": {
         "connection_string": "postgresql://meo:luca55@localhost:5432/pg_aidba",
-        "embedding_model": "BAAI/bge-large-en-v1.5",
+        "embedding_model": "qllama/bge-large-en-v1.5",
+        "tokenizer_model": "gpt-4",
         "chunk_size": 512,
         "chunk_overlap": 50,
         "table_name": "pg_aidba_rag_kb",
@@ -33,5 +35,5 @@
         "similarity_threshold": 1.0,
         "retrieval_limit": 5
     },
-    "debug_mode": true
+    "debug_mode": false
 }

@@ -4,11 +4,13 @@ import sys
 import os
 import datetime
 
+from utils import load_config, get_ollama_embedding
+
 # --- RAG Imports (optional) ---
 try:
     import psycopg2
     from pgvector.psycopg2 import register_vector
-    from sentence_transformers import SentenceTransformer
+    import numpy as np # Import numpy
     RAG_ENABLED = True
 except ImportError:
     RAG_ENABLED = False
@@ -16,32 +18,10 @@ except ImportError:
 # --- Configuration ---
 CONFIG_FILE = "config.json"
 
-def load_config():
-    """Loads configuration from config.json"""
-    try:
-        with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        print(f"Error: Configuration file '{CONFIG_FILE}' not found.", file=sys.stderr)
-        sys.exit(1)
-    except json.JSONDecodeError:
-        print(f"Error: Could not decode JSON from '{CONFIG_FILE}'.", file=sys.stderr)
-        sys.exit(1)
-
-config_data = load_config()
-AI_API_URL = config_data.get("ai_api_url", "http://localhost:11434/api/generate")
-AI_API_KEY = config_data.get("ai_api_key") # Can be None
-AI_API_TIMEOUT = config_data.get("ai_api_timeout", 120)
-ANALYSIS_PROFILES = config_data.get("analysis_profiles", {})
-RAG_CONFIG = config_data.get("rag_config", {})
-LLM_PARAMS = config_data.get("llm_params", {})
-DEBUG_MODE = config_data.get("debug_mode", False)
-
-
 # The model is read from the AI_MODEL environment variable.
 AI_MODEL = os.environ.get("AI_MODEL", "llama3:8b")
 
-def get_rag_context(db_stats):
+def get_rag_context(db_stats, config):
     """
     Connects to the RAG database, generates a query from db_stats,
     and retrieves relevant context. Returns an empty string if RAG fails.
@@ -49,13 +29,16 @@ def get_rag_context(db_stats):
     if not RAG_ENABLED:
         print("--- RAG libraries not installed. Skipping RAG context. ---", file=sys.stderr)
         return ""
+    
+    rag_config = config.get("rag_config", {})
+    debug_mode = config.get("debug_mode", False)
         
-    if not RAG_CONFIG or not RAG_CONFIG.get("connection_string"):
+    if not rag_config or not rag_config.get("connection_string"):
         print("--- RAG not configured. Skipping RAG context. ---", file=sys.stderr)
         return ""
 
     try:
-        print("--- Retrieving RAG context... ---", file=sys.stderr)
+        print("--- Retrieving RAG context (Ollama)... ---", file=sys.stderr)
         
         # 1. Construct search query from failing KPIs and metadata
         kpis = db_stats.get("kpi_summary", [])
@@ -65,7 +48,6 @@ def get_rag_context(db_stats):
         db_name = metadata.get("database_name", "unknown_database")
         pg_version = metadata.get("pg_version", "unknown_version")
 
-        # Combine KPI names with database metadata for a richer query
         search_query_parts = []
         if search_terms:
             search_query_parts.append(f"Failing KPIs: {', '.join(search_terms)}")
@@ -74,46 +56,43 @@ def get_rag_context(db_stats):
         
         search_query = ". ".join(search_query_parts)
         
-        if not search_query_parts: # If no KPIs and no metadata, then no query
+        if not search_query_parts:
             print("--- No relevant information to generate RAG query. Skipping. ---", file=sys.stderr)
             return ""
 
-        if DEBUG_MODE:
+        if debug_mode:
             print(f"--- DEBUG: RAG search query: {search_query} ---", file=sys.stderr)
-        print(f"--- RAG search query: {search_query} ---", file=sys.stderr)
 
-        # 2. Connect to DB
-        conn = psycopg2.connect(RAG_CONFIG["connection_string"])
+        # 2. Generate query embedding via Ollama
+        embedding_model = rag_config.get("embedding_model")
+        if not embedding_model:
+            print("Warning: No `embedding_model` configured for RAG. Skipping.", file=sys.stderr)
+            return ""
+
+        print(f"--- Generating RAG query embedding with model '{embedding_model}'... ---", file=sys.stderr)
+        embedding_list = get_ollama_embedding(embedding_model, search_query, config)
+        if not embedding_list:
+            print("Warning: Failed to generate RAG query embedding. Skipping RAG context.", file=sys.stderr)
+            return ""
+        query_embedding = np.array(embedding_list)
+
+        # 3. Connect to DB
+        conn = psycopg2.connect(rag_config["connection_string"])
         register_vector(conn)
         cur = conn.cursor()
 
-        # 3. Generate query embedding
-        model = SentenceTransformer(RAG_CONFIG["embedding_model"])
-        query_embedding = model.encode(search_query)
-
         # 4. Perform similarity search
-        table_name = RAG_CONFIG.get("table_name", "pg_aidba_rag_kb")
-        distance_metric = RAG_CONFIG.get("distance_metric", "cosine")
-        similarity_threshold = RAG_CONFIG.get("similarity_threshold", 1.0)
-        retrieval_limit = RAG_CONFIG.get("retrieval_limit", 5)
+        table_name = rag_config.get("table_name", "pg_aidba_rag_kb")
+        distance_metric = rag_config.get("distance_metric", "cosine")
+        similarity_threshold = rag_config.get("similarity_threshold", 1.0)
+        retrieval_limit = rag_config.get("retrieval_limit", 5)
 
-        # Map metric names to pgvector operators
-        metric_operators = {
-            "cosine": "<=>",
-            "euclidean": "<->",
-            "inner_product": "<#>"
-        }
-        op = metric_operators.get(distance_metric, "<=>") # Default to cosine
+        metric_operators = {"cosine": "<=>", "euclidean": "<->", "inner_product": "<#"}
+        op = metric_operators.get(distance_metric, "<=>")
 
-        # Build the SQL query
         sql_query = f"SELECT title, content FROM {table_name} "
-        
-        # Add WHERE clause for threshold if applicable
-        # For cosine distance, lower value means more similar. For Euclidean, lower means more similar.
-        # For inner product, higher value means more similar.
-        # We assume similarity_threshold is for distance, so lower is better.
-        if similarity_threshold < 1.0: 
-            sql_query += f"WHERE embedding {op} %s < %s " 
+        if similarity_threshold < 1.0:
+            sql_query += f"WHERE embedding {op} %s < %s "
             order_by_clause = f"ORDER BY embedding {op} %s"
             params = (query_embedding, similarity_threshold, query_embedding)
         else:
@@ -123,20 +102,15 @@ def get_rag_context(db_stats):
         sql_query += f"{order_by_clause} LIMIT %s"
         params += (retrieval_limit,)
 
-        if DEBUG_MODE:
-            print(f"--- DEBUG: RAG SQL query: {sql_query} ---", file=sys.stderr)
-            print(f"--- DEBUG: RAG SQL params: {params} ---", file=sys.stderr)
         cur.execute(sql_query, params)
         results = cur.fetchall()
         cur.close()
         conn.close()
 
-        if DEBUG_MODE:
-            print(f"--- DEBUG: RAG query results: {results} ---", file=sys.stderr)
         if not results:
             return ""
 
-        # 5. Format context, grouping by title
+        # 5. Format context
         from collections import defaultdict
         grouped_results = defaultdict(list)
         for title, content in results:
@@ -155,11 +129,15 @@ def get_rag_context(db_stats):
         print(f"Warning: Failed to retrieve RAG context. Proceeding without it. Error: {e}", file=sys.stderr)
         return ""
 
-
-def get_analysis_from_llm(prompt_data, params):
+def get_analysis_from_llm(prompt_data, params, config):
     """
     Sends the provided data to a compatible LLM API and returns the response.
     """
+    ai_api_url = config.get("ai_api_url", "http://localhost:11434/api/generate")
+    ai_api_key = config.get("ai_api_key")
+    ai_api_timeout = config.get("ai_api_timeout", 120)
+    debug_mode = config.get("debug_mode", False)
+
     try:
         payload = {
             "model": AI_MODEL,
@@ -167,33 +145,31 @@ def get_analysis_from_llm(prompt_data, params):
             "stream": False
         }
         
-        # Add optional LLM parameters (temperature, top_p, etc.)
-        # For Ollama, these are nested under "options"
         if params:
             payload["options"] = params
 
         headers = {"Content-Type": "application/json"}
-        if AI_API_KEY:
-            headers["Authorization"] = f"Bearer {AI_API_KEY}"
+        if ai_api_key:
+            headers["Authorization"] = f"Bearer {ai_api_key}"
 
-        if DEBUG_MODE:
+        if debug_mode:
             print(f"--- DEBUG: Sending payload to AI: {json.dumps(payload, indent=2)} ---", file=sys.stderr)
-        print(f"--- Contacting AI at {AI_API_URL} with model {AI_MODEL}... ---", file=sys.stderr)
+        print(f"--- Contacting AI at {ai_api_url} with model {AI_MODEL}... ---", file=sys.stderr)
         
-        response = requests.post(AI_API_URL, json=payload, headers=headers, timeout=AI_API_TIMEOUT)
+        response = requests.post(ai_api_url, json=payload, headers=headers, timeout=ai_api_timeout)
         response.raise_for_status()
 
         print("--- Received response. Generating report... ---", file=sys.stderr)
         
         response_json = response.json()
-        if DEBUG_MODE:
+        if debug_mode:
             print(f"--- DEBUG: Received response from AI: {json.dumps(response_json, indent=2)} ---", file=sys.stderr)
         return response_json.get("response", "").strip()
 
     except requests.exceptions.Timeout:
-        return f"Error: The request to the AI API timed out after {AI_API_TIMEOUT} seconds."
+        return f"Error: The request to the AI API timed out after {ai_api_timeout} seconds."
     except requests.exceptions.RequestException as e:
-        return f"Error: Could not connect to AI API at {AI_API_URL}. Please ensure the endpoint is correct and the service is running. Details: {e}"
+        return f"Error: Could not connect to AI API at {ai_api_url}. Please ensure the endpoint is correct and the service is running. Details: {e}"
     except json.JSONDecodeError:
         return "Error: Failed to decode JSON response from the AI API."
     except Exception as e:
@@ -201,16 +177,18 @@ def get_analysis_from_llm(prompt_data, params):
 
 def main():
     """
-    Main function to read data, generate a prompt from an external file, and save the analysis.
-    Accepts a command-line argument for analysis type ('perf' or 'base'). Defaults to 'base'.
+    Main function to read data, generate a prompt, and save the analysis.
     """
-    # Determine analysis type from command-line arguments
-    if len(sys.argv) > 1 and sys.argv[1] in ANALYSIS_PROFILES:
+    config = load_config()
+    analysis_profiles = config.get("analysis_profiles", {})
+    llm_params_config = config.get("llm_params", {})
+
+    if len(sys.argv) > 1 and sys.argv[1] in analysis_profiles:
         analysis_type = sys.argv[1]
     else:
-        analysis_type = "base" # Default to base analysis
+        analysis_type = "base"
     
-    profile = ANALYSIS_PROFILES.get(analysis_type, {})
+    profile = analysis_profiles.get(analysis_type, {})
     if not profile:
         print(f"Error: Analysis profile '{analysis_type}' not found in {CONFIG_FILE}.", file=sys.stderr)
         sys.exit(1)
@@ -218,8 +196,7 @@ def main():
     data_file = profile.get("data_file")
     prompt_file = profile.get("prompt_file")
     output_prefix = profile.get("output_prefix")
-    llm_params = LLM_PARAMS.get(analysis_type, {})
-
+    llm_params = llm_params_config.get(analysis_type, {})
 
     print(f"--- Running analysis type: '{analysis_type}' ---", file=sys.stderr)
 
@@ -237,10 +214,9 @@ def main():
         print(f"Error: Could not decode JSON from '{data_file}'. The file might be empty or malformed.", file=sys.stderr)
         sys.exit(1)
 
-    # --- RAG Context (for 'perf' analysis only) ---
     rag_context = ""
     if analysis_type == 'perf':
-        rag_context = get_rag_context(db_stats)
+        rag_context = get_rag_context(db_stats, config)
 
     try:
         with open(prompt_file, 'r') as f:
@@ -249,20 +225,16 @@ def main():
         print(f"Error: Prompt file '{prompt_file}' not found.", file=sys.stderr)
         sys.exit(1)
 
-    # Construct the full prompt
     full_prompt = prompt_template.format(rag_context=rag_context, json_data=db_stats_json_string)
 
-    # Get the analysis
-    analysis = get_analysis_from_llm(full_prompt, llm_params)
+    analysis = get_analysis_from_llm(full_prompt, llm_params, config)
     
     end_time = datetime.datetime.now()
 
-    # --- File Generation ---
     database_name = db_stats.get("metadata", {}).get("database_name", "unknown_db")
     timestamp_str = start_time.strftime("%Y%m%d_%H%M%S")
     output_filename = f"{output_prefix}.{database_name}.{timestamp_str}.md"
 
-    # --- Footer ---
     footer = "\n---\n"
     footer += f"*Report generated by pg_aidba ({analysis_type}) on {start_time.strftime('%Y-%m-%d at %H:%M:%S')}*\n"
     footer += f"*Model used: `{AI_MODEL}`*\n"
@@ -278,7 +250,6 @@ def main():
     except IOError as e:
         print(f"Error: Could not write report to file '{output_filename}'. Details: {e}", file=sys.stderr)
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()

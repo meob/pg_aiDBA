@@ -2,7 +2,7 @@
 
 ![Logo](logo.png)
 
-This project uses a combination of SQL scripts and an interface to a Large Language Model (LLM) to perform analysis on a PostgreSQL database and generate useful reports in Markdown format.
+This project uses a combination of SQL scripts and an interface to a Large Language Model (LLM) to perform analysis on a PostgreSQL database and generate useful reports in Markdown format. The project is highly configurable and can be run entirely locally (including the LLM) or by leveraging powerful cloud-based models.
 
 The system is designed with two distinct analysis levels: **base** (for operational checks) and **perf** (for expert performance tuning).
 
@@ -62,7 +62,10 @@ This will create a report file named `pg2aidba-base.<db_name>.<timestamp>.md`.
 
 ## Configuration
 
-The `config.json` file allows you to configure the `ai_api_url`. This makes it easy to switch to any OpenAI-compatible LLM provider (cloud or local) by changing the URL.
+The `config.json` file allows you to configure the API endpoints for your LLM. This makes it easy to switch to any OpenAI-compatible LLM provider (cloud or local).
+
+- `ai_api_url`: The endpoint for text generation (e.g., `http://localhost:11434/api/generate`).
+- `ai_api_embedding_url`: The endpoint for generating embeddings (e.g., `http://localhost:11434/api/embeddings`).
 
 For the `base` analysis, it is recommended to have a local Ollama instance running with the `llama3:8b` model pulled (`ollama pull llama3:8b`).
 
@@ -119,7 +122,7 @@ The Retrieval-Augmented Generation (RAG) feature allows the AI to pull context f
   - **Known Anti-Patterns**: Documented common issues, inefficient code patterns, or specific behaviors of your application.
   - **Internal Best Practices**: Your organization's specific guidelines for PostgreSQL tuning, deployment, or monitoring.
   - **Domain-Specific Tuning**: Advice tailored to your industry or specific use cases.
-- **Adding Documents**: To add knowledge, place your own Markdown (`.md`) or text (`.txt`) files into the `rag_sources/` directory. The project includes technical articles and templates to get you started.
+- **Adding Documents**: To add knowledge, place your own Markdown (`.md`) or text (`.txt`) files into the `rag_sources/` directory. The project includes technical articles and templates to get you started; it is very important that documents are **customized to what is actually present** in the environments to be checked.
 - **Loading Documents**: After adding or changing documents, you must load them into the vector database by running:
   ```bash
   python3 load_rag.py
@@ -127,21 +130,40 @@ The Retrieval-Augmented Generation (RAG) feature allows the AI to pull context f
 
 ### RAG Parameters
 
-The behavior of the RAG system is controlled by the `rag_config` section in `config.json`.
+The behavior of the RAG data loading process is controlled by the following parameters in the `rag_config` section of the `config.json` file.
 
-- **`embedding_model`**: The model used to create numerical representations of text. The default is now set to `BAAI/bge-large-en-v1.5`, a powerful and well-regarded model. You can switch to other models, but you **must** re-run `load_rag.py` after changing the name.
-  - **Important Note on Changing Models**: If you change the `embedding_model`, you **must** manually drop the RAG table in your PostgreSQL database (e.g., `DROP TABLE pg_aidba_rag_kb;` in `psql`) before re-running `python3 load_rag.py`. This is because different embedding models produce vectors of different dimensions, and the database table needs to be recreated with the correct vector dimension. Alternatively, you can change the `table_name` in `config.json` to use a new table.
-  - **Good Alternatives**: `nomic-ai/nomic-embed-text-v1.5` (very efficient), `Salesforce/SFR-Embedding-Mistral` (latest generation), or the lighter `all-MiniLM-L6-v2` (fast, less resource-intensive).
-- **`chunk_size`**: The size of each piece of text (in tokens) stored in the vector database. The default of `512` is a good balance between context size and focus.
-- **`chunk_overlap`**: The number of tokens that overlap between consecutive chunks. This prevents sentences from being cut in half and losing their meaning.
+- **`embedding_model`**: The name of the embedding model to use, which **must be available on your Ollama instance**. This model is used to create numerical representations (embeddings) of your text documents. Example: `qllama/bge-large-en-v1.5`.
+  - **Important Note on Changing Models**: If you change the `embedding_model`, you **must** re-run `python3 load_rag.py`. The script will automatically detect the new embedding dimension and recreate the table if necessary. It is recommended to use a new `table_name` in the configuration or manually drop the old table (`DROP TABLE pg_aidba_rag_kb;`) to avoid issues.
 
-## RAG Search Parameters
+- **`tokenizer_model`**: The name of the model used by the `tiktoken` library for chunking text into tokens. The default, `"gpt-4"`, is a robust choice for general text. You can change it if you have specific tokenization needs.
 
-The RAG search functionality has been enhanced to include database metadata and support parametric searches, allowing for more precise and context-aware retrieval of information.
+- **`chunk_size`**: The maximum size of each text chunk **in tokens**. The default of `512` is a good balance between context size and focus, and it matches the context window of many embedding models.
 
-- **Database Metadata Inclusion**: When performing RAG searches, relevant metadata from the PostgreSQL database is now automatically incorporated into the query context. This enriches the search with real-time database schema, statistics, and configuration details, leading to more accurate and tailored recommendations.
-- **Parametric Searches**: The RAG system now supports parametric queries, enabling users to specify conditions and filters for their searches. This allows for highly targeted information retrieval based on specific criteria, improving the relevance of the retrieved documents for the LLM.
+- **`chunk_overlap`**: The number of tokens that overlap between consecutive chunks. This helps prevent sentences from being cut in half and losing their meaning, providing better context.
+
+### RAG Search Parameters
+
+These parameters, also in `rag_config`, control how the RAG system searches for relevant documents in the knowledge base.
+
+- **`distance_metric`**: The metric for the similarity search. It can be `cosine` (default), `euclidean` (L2), or `inner_product`. For text embeddings, `cosine` is generally the recommended and most effective metric.
+
+- **`similarity_threshold`**: A filter to exclude less relevant results. For `cosine` and `euclidean` distance, where lower values mean higher similarity, only results with a distance *less than* this value are returned. The default of `1.0` effectively disables this filter. Note that `pgvector` calculates **cosine distance** (`1 - cosine similarity`), which ranges from 0 (identical) to 2 (opposite). Therefore, a smaller value indicates higher similarity. A value like `0.4` or `0.5` can be used to enforce a stricter similarity match.
+
+- **`retrieval_limit`**: The maximum number of document chunks to retrieve from the knowledge base. These retrieved chunks are then added to the LLM's prompt to provide context for the analysis.
+
+### Advanced Note: RAG vs. Fine-Tuning
+
+This project leverages Retrieval-Augmented Generation (RAG) to provide specific knowledge to the LLM. An alternative approach is to fine-tune a model. However, fine-tuning requires creating a large and expensive training dataset (hundreds of expert-written sample reports). RAG proves to be a more practical and flexible solution, allowing the knowledge base to be updated by simply editing text files in the `rag_sources/` directory, without needing to retrain the model.
+
+### SQL Scripts Customization
+
+Last but not least, the SQL scripts (`pg2aidba_base.sql` and `pg2aidba.sql`) are a critical component. They are the first to be executed and collect all the raw data for the analysis.
+
+The queries in these files have been extracted and adapted from the comprehensive `pg2html.sql` script found in the [db2html project](https://github.com/meob/db2html/tree/master/pg2html/pg2html.sql). You can modify these scripts to add, remove, or alter queries to better suit your specific monitoring needs.
+
+**Important**: If you add new queries or data points, remember to update the corresponding prompt file (`prompt/base_prompt.txt` or `prompt/perf_prompt.txt`). This ensures the LLM is aware of the new data and can include it in its analysis.
 
 ## License
 
 This project is released under the Apache 2.0 license (meob).
+
