@@ -25,7 +25,7 @@
         }
     },
     "rag_config": {
-        "connection_string": "postgresql://meo:luca55@localhost:5432/pg_aidba",
+        "connection_string": "postgresql://user:password@localhost:5432/your_db_name",
         "embedding_model": "qllama/bge-large-en-v1.5",
         "tokenizer_model": "gpt-4",
         "chunk_size": 512,

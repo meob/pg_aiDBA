@@ -1,7 +1,7 @@
 # Ignore generated data and report files
 *.json
 !config.json
-*.md
+pg2aidba-*.md
 !README.md
 
 # Ignore system and cache files
